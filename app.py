@@ -92,6 +92,7 @@ class PointCloudApp(QMainWindow):
         self.progress.setMaximumWidth(180)
         self.progress.hide()
         self.statusBar().addPermanentWidget(self.progress)
+        self.refresh_operation_buttons()
 
     def init_ui(self):
         """初始化图形界面"""
@@ -226,8 +227,8 @@ class PointCloudApp(QMainWindow):
             self.tool_tabs.addTab(page, name)
         descriptions = [
             "1 · 调整体素边长，生成处理预览。",
-            "2 · 基于降采样结果去噪，并检查移除点。",
-            "3 · 为当前处理结果估计和统一法向量。",
+            "2 · 可直接对原始点云去噪，也可先降采样；结果可检查、导出。",
+            "3 · 可直接估计原始点云法向量，或处理当前结果。",
             "调整点大小、背景和坐标轴，或保存截图。",
             "记住观察角度，或保存、读取视角文件。",
         ]
@@ -356,7 +357,7 @@ class PointCloudApp(QMainWindow):
         self.restore_button.setEnabled(False)
         controls.addWidget(self.restore_button)
 
-        self.export_button = QPushButton("导出当前处理结果")
+        self.export_button = QPushButton("导出当前点云")
         self.export_button.clicked.connect(self.export_downsample)
         self.export_button.setEnabled(False)
         controls.addWidget(self.export_button)
@@ -470,6 +471,7 @@ class PointCloudApp(QMainWindow):
             return
         try:
             self._completion(result)
+            self.refresh_operation_buttons()
         except Exception as error:
             self.logger.exception("更新处理结果失败")
             self.fail_background(str(error))
@@ -581,9 +583,10 @@ class PointCloudApp(QMainWindow):
         neighbors = self.neighbor_input.value()
         if not radius_filter and len(source.points) <= neighbors:
             QMessageBox.warning(
-                self, "点数不足", "邻居数需要小于降采样点数，请减小邻居数或体素边长。"
+                self, "点数不足", "邻居数需要小于本次输入点数，请减小邻居数。"
             )
             return
+        source_name = "原始点云" if source is self.current_cloud else "降采样结果"
         radius = self.radius_input.value()
         minimum_points = self.radius_points_input.value()
         std_ratio = self.std_ratio_input.value()
@@ -615,13 +618,15 @@ class PointCloudApp(QMainWindow):
             self.removed_cloud = removed
             self.removed_checkbox.setEnabled(not removed.is_empty())
             self.export_removed_button.setEnabled(not removed.is_empty())
+            self.normal_button.setEnabled(True)
+            self.restore_button.setEnabled(True)
             self.sampled_cloud = cleaned
             self.orient_normals_button.setEnabled(cleaned.has_normals())
             self.consistent_normals_button.setEnabled(cleaned.has_normals())
             self.export_button.setEnabled(True)
             self.voxel_status.setText(
                 f"原始 {len(self.current_cloud.points):,} 点 · "
-                f"降采样 {len(source.points):,} 点 → {method} {len(cleaned.points):,} 点 · "
+                f"输入：{source_name} {len(source.points):,} 点 → {method} {len(cleaned.points):,} 点 · "
                 f"移除 {len(source.points) - len(cleaned.points):,} 点"
             )
 
@@ -656,7 +661,7 @@ class PointCloudApp(QMainWindow):
     def estimate_current_normals(self):
         if self._job is not None:
             return
-        source = self.sampled_cloud
+        source = self.active_cloud()
         if source is None:
             return
         neighbors = self.normal_neighbors.value()
@@ -692,7 +697,7 @@ class PointCloudApp(QMainWindow):
     def orient_current_normals(self, consistent=False):
         if self._job is not None:
             return
-        source = self.sampled_cloud
+        source = self.active_cloud()
         if source is None or not source.has_normals():
             return
         neighbors = self.normal_neighbors.value()
@@ -728,6 +733,22 @@ class PointCloudApp(QMainWindow):
 
         self.run_background("法向量定向", calculate, apply_result)
 
+    def active_cloud(self):
+        return self.sampled_cloud if self.sampled_cloud is not None else self.current_cloud
+
+    def refresh_operation_buttons(self):
+        cloud = self.active_cloud()
+        available = cloud is not None and not cloud.is_empty()
+        has_normals = available and cloud.has_normals()
+        self.normal_button.setEnabled(available)
+        self.export_button.setEnabled(available)
+        self.orient_normals_button.setEnabled(has_normals)
+        self.consistent_normals_button.setEnabled(has_normals)
+        self.normal_checkbox.setEnabled(has_normals)
+        if not has_normals:
+            self.normal_checkbox.setChecked(False)
+        self.restore_button.setEnabled(self.sampled_cloud is not None)
+
     def restore_original(self):
         try:
             self.viewport.show_cloud(self.current_cloud)
@@ -742,16 +763,17 @@ class PointCloudApp(QMainWindow):
         self.orient_normals_button.setEnabled(False)
         self.normal_button.setEnabled(False)
         self.clear_removed_preview()
-        self.filter_source = None
-        self.filter_button.setEnabled(False)
-        self.radius_filter_button.setEnabled(False)
+        self.filter_source = self.current_cloud
+        self.filter_button.setEnabled(self.current_cloud is not None)
+        self.radius_filter_button.setEnabled(self.current_cloud is not None)
         self.sampled_cloud = None
         self.export_button.setEnabled(False)
         self.voxel_status.setText(f"正在显示原始点云 · {len(self.current_cloud.points):,} 点")
         self.restore_button.setEnabled(False)
+        self.refresh_operation_buttons()
 
     def export_downsample(self):
-        self.export_cloud(self.sampled_cloud, "导出当前处理结果", "_voxel")
+        self.export_cloud(self.active_cloud(), "导出当前点云", "_export")
 
     def export_removed(self):
         self.export_cloud(self.removed_cloud, "导出红色移除点", "_removed")
